@@ -205,7 +205,7 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
             episode_score = result.info.get("episode_score", 0.0)
 
             print(f"  ← {result.observation.last_action_result}")
-            print(f"  ← step_reward={result.reward.value:.3f}  done={done}  episode_score={episode_score:.3f}")
+            print(f"  ← step_reward={result.reward:.3f}  done={done}  episode_score={episode_score:.3f}")
 
             messages.append({
                 "role": "tool",

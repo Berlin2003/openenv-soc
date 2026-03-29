@@ -40,7 +40,7 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         self._step_count = 0
         self._episode_score = 0.0
         self._done = False
-        self._network = MockCorporateNetwork(seed=seed if seed else 42, task=task)
+        self._network = MockCorporateNetwork(task_name=task)
         self._initial_alert = self._generate_alert(task)
         
         obs = SOCObservation(
@@ -72,13 +72,13 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         is_terminal = False
 
         if action.action_type == "query_logs":
-            res = self._network.query_logs(action.source.value if hasattr(action.source, 'value') else action.source, action.query)
-            if not res:
+            source_str = action.source.value if hasattr(action.source, 'value') else action.source
+            res = self._network.query_logs(source_str, action.query)
+            if res.startswith("No "):
                 reward = -0.02
-                result_msg = f"No {action.source} logs found matching '{action.query}'."
             else:
                 reward = 0.05
-                result_msg = "\\n".join(res)
+            result_msg = res
         
         elif action.action_type == "query_threat_intel":
             res = self._network.query_threat_intel(action.indicator)

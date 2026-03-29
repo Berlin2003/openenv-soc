@@ -36,6 +36,13 @@ class MockCorporateNetwork:
         self._last_close: Optional[Dict] = None
         self._setup()
 
+    def get_status(self) -> dict:
+        return {
+            "isolated_hosts": self.isolated_hosts,
+            "blocked_ips": self.blocked_ips,
+            "revoked_sessions": self.revoked_sessions
+        }
+
     # ------------------------------------------------------------------
     # Scenario Setup  (deterministic, seeded per task)
     # ------------------------------------------------------------------
