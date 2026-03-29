@@ -1,0 +1,27 @@
+name: soc-env
+version: 1.0.0
+description: >
+  OpenEnv-SOC — Autonomous Security Operations Center Analyst.
+  An AI agent must investigate corporate network security alerts by querying logs,
+  analyzing threat intelligence, and remediating threats (blocking IPs, isolating hosts).
+  3 tasks ranging from easy (false positive) to hard (ransomware lateral movement).
+author: OpenEnv Community
+entrypoint: server.app:app
+tags:
+  - openenv
+  - cybersecurity
+  - soc
+  - real-world
+tasks:
+  - id: easy
+    name: Phishing False Positive
+    description: Identify that a reported suspicious link is benign and close the alert without overreacting.
+    max_steps: 15
+  - id: medium
+    name: Credential Stuffing Attack
+    description: Detect a brute-force VPN attack that resulted in a compromised account, block the attacker and revoke the session.
+    max_steps: 15
+  - id: hard
+    name: Ransomware Lateral Movement
+    description: Trace ransomware from an infected endpoint to a critical database server and isolate both hosts before data exfiltration.
+    max_steps: 10
