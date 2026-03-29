@@ -1,240 +1,166 @@
-"""
-server/environment.py
-Core SOC Environment — server-side logic.
-Uses Pydantic models from models.py.
-step() API: returns StepResult(observation, reward, done, info)
-"""
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-from models import (
-    SOCObservation, SOCReward, SOCState, StepResult,
-    Alert, NetworkStatus,
-    QueryLogs, QueryThreatIntel, BlockIPAddress,
-    IsolateHost, RevokeUserSession, CloseAlert, SOCAction,
-)
+from typing import Optional
+from openenv.core import Environment
+from models import SOCAction, SOCObservation, SOCState, Alert, NetworkStatus
 from server.mock_network import MockCorporateNetwork
 
-MAX_STEPS = {"easy": 15, "medium": 15, "hard": 10}
-
-
-class SOCEnvironment:
-    """
-    OpenEnv-SOC core environment.
-    Implements reset() / step() / state() per the competition spec.
-    step() returns StepResult(observation, reward, done, info).
-    """
-
-    def __init__(self):
-        self._task: str = "easy"
-        self._net: MockCorporateNetwork | None = None
-        self._step_count: int = 0
-        self._done: bool = False
-        self._episode_score: float = 0.0
-        self._last_result: str = ""
-
-    # ------------------------------------------------------------------
-    # reset() → SOCObservation
-    # ------------------------------------------------------------------
-    def reset(self, task: str = "easy") -> SOCObservation:
-        """Start a fresh episode for the given task. Returns initial observation."""
-        self._task = task
-        self._net = MockCorporateNetwork(task)
+class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._network = None
+        self._task_name = "easy"
         self._step_count = 0
-        self._done = False
+        self._max_steps = 15
         self._episode_score = 0.0
-        self._last_result = (
-            f"[SOC Terminal] Incident queue loaded for task='{task}'. "
-            f"Max steps: {MAX_STEPS.get(task, 15)}. Investigate and remediate."
+        self._done = False
+        self._initial_alert = None
+
+    def _generate_alert(self, task: str) -> Alert:
+        if task == "easy":
+            return Alert(
+                alert_id="ALT-001", severity="Medium",
+                description="User reported suspicious login link: login.secure-oauth.com",
+                target_host="marketing-laptop-01"
+            )
+        elif task == "medium":
+            return Alert(
+                alert_id="ALT-002", severity="High",
+                description="Multiple failed logins followed by successful login for j.smith from external IP",
+                target_host="vpn-gateway"
+            )
+        elif task == "hard":
+            return Alert(
+                alert_id="ALT-003", severity="Critical",
+                description="EDR blocked 'Invoke-Crypt' payload execution",
+                target_host="marketing-laptop-02"
+            )
+        return Alert(alert_id="ALT-000", severity="Low", description="Unknown task")
+
+    def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, task: str = "easy", **kwargs) -> SOCObservation:
+        self._task_name = task
+        self._step_count = 0
+        self._episode_score = 0.0
+        self._done = False
+        self._network = MockCorporateNetwork(seed=seed if seed else 42, task=task)
+        self._initial_alert = self._generate_alert(task)
+        
+        obs = SOCObservation(
+            open_alerts=[self._initial_alert],
+            network_status=self._network.get_status(),
+            last_action_result=f"[SOC Terminal] Incident queue loaded for task='{task}'. Max steps: {self._max_steps}. Investigate and remediate.",
+            step_count=self._step_count,
+            reward=0.0,
+            done=False,
+            metadata={"episode_score": self._episode_score}
         )
-        return self._make_obs()
+        # Required by OpenEnv core:
+        obs.done = False
+        obs.reward = 0.0
+        return obs
 
-    # ------------------------------------------------------------------
-    # step(action) → StepResult(observation, reward, done, info)
-    # ------------------------------------------------------------------
-    def step(self, action: SOCAction) -> StepResult:
-        """Execute one action. Returns (observation, reward, done, info)."""
+    def step(self, action: SOCAction, timeout_s: Optional[float] = None, **kwargs) -> SOCObservation:
         if self._done:
-            return StepResult(
-                observation=self._make_obs(),
-                reward=SOCReward(value=0.0, reason="Episode already finished."),
-                done=True,
-                info={"warning": "Episode already done."},
+            return SOCObservation(
+                open_alerts=[], network_status=self._network.get_status(),
+                last_action_result="Episode is already done. Please reset().",
+                step_count=self._step_count,
+                done=True, reward=0.0, metadata={"episode_score": self._episode_score}
             )
-
+        
         self._step_count += 1
-        step_reward = 0.0
-        reward_reason = ""
+        reward = 0.0
+        result_msg = ""
+        is_terminal = False
 
-        # ---- Action dispatch -----------------------------------------
-        if isinstance(action, QueryLogs):
-            result = self._net.query_logs(action.source, action.query)
-            self._last_result = result
-            if "No " not in result:
-                step_reward = 0.05
-                reward_reason = "Relevant logs found. Partial progress reward."
+        if action.action_type == "query_logs":
+            res = self._network.query_logs(action.source.value if hasattr(action.source, 'value') else action.source, action.query)
+            if not res:
+                reward = -0.02
+                result_msg = f"No {action.source} logs found matching '{action.query}'."
             else:
-                step_reward = -0.02
-                reward_reason = "Query returned no results. Small penalty for wasted step."
-
-        elif isinstance(action, QueryThreatIntel):
-            result = self._net.query_threat_intel(action.indicator)
-            self._last_result = result
-            if "UNKNOWN" not in result:
-                step_reward = 0.05
-                reward_reason = "Threat intel hit. Partial progress reward."
-            else:
-                step_reward = 0.01
-                reward_reason = "No threat intel match."
-
-        elif isinstance(action, BlockIPAddress):
-            self._net.block_ip(action.ip_address)
-            self._last_result = f"Firewall updated: {action.ip_address} BLOCKED."
-            reward_reason = "IP blocked — episode score determined at close."
-
-        elif isinstance(action, IsolateHost):
-            self._net.isolate_host(action.hostname)
-            self._last_result = f"Host '{action.hostname}' isolated from network."
-            reward_reason = "Host isolated — episode score determined at close."
-
-        elif isinstance(action, RevokeUserSession):
-            self._net.revoke_session(action.username)
-            self._last_result = f"All active sessions for '{action.username}' revoked."
-            reward_reason = "Session revoked — episode score determined at close."
-
-        elif isinstance(action, CloseAlert):
-            self._net.close_alert(
-                action.alert_id, action.resolution_summary, action.is_false_positive
-            )
+                reward = 0.05
+                result_msg = "\\n".join(res)
+        
+        elif action.action_type == "query_threat_intel":
+            res = self._network.query_threat_intel(action.indicator)
+            reward = 0.05
+            result_msg = f"ThreatDB lookup for '{action.indicator}': {res}"
+            
+        elif action.action_type == "block_ip":
+            self._network.block_ip(action.ip_address)
+            reward = 0.05
+            result_msg = f"Firewall rule added: DROP IP {action.ip_address}"
+            
+        elif action.action_type == "isolate_host":
+            self._network.isolate_host(action.hostname)
+            reward = -0.1 if self._task_name == "easy" else 0.05
+            result_msg = f"Host {action.hostname} isolated from network."
+            
+        elif action.action_type == "revoke_session":
+            self._network.revoke_session(action.username)
+            reward = 0.05
+            result_msg = f"All active sessions revoked for {action.username}."
+            
+        elif action.action_type == "close_alert":
             self._done = True
-            self._last_result = (
-                f"Alert {action.alert_id} closed. Resolution: {action.resolution_summary}"
-            )
-
-        else:
-            self._last_result = "Unknown action type. No effect."
-            step_reward = -0.05
-            reward_reason = "Penalty for invalid action."
-
-        # ---- Max steps termination -----------------------------------
-        max_s = MAX_STEPS.get(self._task, 15)
-        if self._step_count >= max_s and not self._done:
+            is_terminal = True
+            reward = self._grade_task(action.is_false_positive)
+            result_msg = f"Alert {action.alert_id} closed."
+            
+        self._episode_score = round(self._episode_score + reward, 4)
+        if self._step_count >= self._max_steps and not self._done:
             self._done = True
-            self._last_result += " | MAX STEPS REACHED — episode terminated."
-
-        # ---- Final grading at episode end ----------------------------
-        if self._done:
-            step_reward = self._grade()
-            reward_reason = f"Final episode grade for task='{self._task}'."
-
-        self._episode_score += step_reward
-        obs = self._make_obs()
-        reward = SOCReward(value=round(max(0.0, min(1.0, step_reward)), 4), reason=reward_reason)
-
-        return StepResult(
-            observation=obs,
+            is_terminal = True
+            result_msg += f" \\nMax steps ({self._max_steps}) reached."
+            
+        obs = SOCObservation(
+            open_alerts=[self._initial_alert] if not self._done else [],
+            network_status=self._network.get_status(),
+            last_action_result=result_msg,
+            step_count=self._step_count,
             reward=reward,
             done=self._done,
-            info={"episode_score": round(self._episode_score, 4), "step": self._step_count},
+            metadata={"episode_score": self._episode_score}
         )
+        return obs
 
-    # ------------------------------------------------------------------
-    # state → SOCState
-    # ------------------------------------------------------------------
+    def _grade_task(self, declared_fp: bool) -> float:
+        status = self._network.get_status()
+        if self._task_name == "easy":
+            expected_fp = True
+            hosts = status.isolated_hosts
+            score = 1.0 if declared_fp else 0.0
+            if hosts: score -= 0.5
+            return max(0.0, score)
+        
+        elif self._task_name == "medium":
+            expected_fp = False
+            score = 0.0
+            if not declared_fp: score += 0.2
+            if "104.22.33.44" in status.blocked_ips: score += 0.4
+            if "j.smith" in status.revoked_sessions: score += 0.4
+            return max(0.0, score)
+            
+        elif self._task_name == "hard":
+            expected_fp = False
+            score = 0.0
+            if not declared_fp: score += 0.2
+            if "marketing-laptop-02" in status.isolated_hosts: score += 0.4
+            if "db-server-main" in status.isolated_hosts:
+                score += 0.4 if self._step_count <= 6 else 0.1
+            return max(0.0, score)
+            
+        return 0.0
+
     @property
     def state(self) -> SOCState:
-        """Return episode-level metadata."""
+        status = self._network.get_status() if self._network else NetworkStatus()
         return SOCState(
-            task_name=self._task,
+            task_name=self._task_name,
             step_count=self._step_count,
-            max_steps=MAX_STEPS.get(self._task, 15),
-            episode_score=round(self._episode_score, 4),
+            max_steps=self._max_steps,
+            episode_score=self._episode_score,
             done=self._done,
-            isolated_hosts=list(self._net.isolated_hosts) if self._net else [],
-            blocked_ips=list(self._net.blocked_ips) if self._net else [],
-            revoked_sessions=list(self._net.revoked_sessions) if self._net else [],
-        )
-
-    # ------------------------------------------------------------------
-    # Graders — deterministic, 0.0–1.0
-    # ------------------------------------------------------------------
-    def _grade(self) -> float:
-        n = self._net
-        if self._task == "easy":
-            return self._grade_easy(n)
-        elif self._task == "medium":
-            return self._grade_medium(n)
-        elif self._task == "hard":
-            return self._grade_hard(n)
-        return 0.0
-
-    @staticmethod
-    def _grade_easy(n: MockCorporateNetwork) -> float:
-        """
-        Phishing False Positive.
-        Full score for closing as FP with no host isolations.
-        Penalise unnecessary host isolation.
-        """
-        lc = n._last_close
-        if lc is None:
-            return 0.0
-        score = 1.0 if lc["is_false_positive"] else 0.0
-        score -= 0.5 * len(n.isolated_hosts)   # over-reaction penalty
-        return max(0.0, min(1.0, score))
-
-    @staticmethod
-    def _grade_medium(n: MockCorporateNetwork) -> float:
-        """
-        Credential Stuffing.
-        +0.5 block attacker IP, +0.5 revoke compromised user session.
-        """
-        score = 0.0
-        if "104.22.33.44" in n.blocked_ips:
-            score += 0.5
-        if "j.smith" in n.revoked_sessions or "j.smith@corp.com" in n.revoked_sessions:
-            score += 0.5
-        wrong_blocks = [ip for ip in n.blocked_ips if ip != "104.22.33.44"]
-        score -= 0.25 * len(wrong_blocks)
-        return max(0.0, min(1.0, score))
-
-    def _grade_hard(self, n: MockCorporateNetwork) -> float:
-        """
-        Ransomware Lateral Movement.
-        Both hosts must be isolated. Speed bonus for fast containment.
-        """
-        laptop = "marketing-laptop-02" in n.isolated_hosts
-        db_srv = "db-server-main" in n.isolated_hosts
-
-        if laptop and db_srv:
-            if self._step_count <= 6:
-                return 1.0
-            elif self._step_count <= 8:
-                return 0.75
-            return 0.5      # contained but probably too late
-        elif laptop or db_srv:
-            return 0.3      # partial containment
-        return 0.0
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _make_obs(self) -> SOCObservation:
-        alerts = [
-            Alert(
-                alert_id=a.alert_id, severity=a.severity,
-                description=a.description, source_ip=a.source_ip,
-                target_host=a.target_host,
-            )
-            for a in (self._net.alerts if self._net else [])
-        ]
-        ns = NetworkStatus(
-            isolated_hosts=list(self._net.isolated_hosts) if self._net else [],
-            blocked_ips=list(self._net.blocked_ips) if self._net else [],
-            revoked_sessions=list(self._net.revoked_sessions) if self._net else [],
-        )
-        return SOCObservation(
-            open_alerts=alerts,
-            network_status=ns,
-            last_action_result=self._last_result,
-            step_count=self._step_count,
+            isolated_hosts=status.isolated_hosts,
+            blocked_ips=status.blocked_ips,
+            revoked_sessions=status.revoked_sessions
         )
