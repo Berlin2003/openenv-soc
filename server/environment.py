@@ -145,12 +145,14 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         elif action.action_type == "close_alert":
             self._done = True
             grade = self._grade_task(action.is_false_positive or False)
+            # episode_score IS the grader output — always in [0.0, 1.0].
+            # Per-step rewards are the learning signal only (reward field per step).
+            self._episode_score = round(grade, 4)
             reward = grade
-            self._episode_score = round(self._episode_score + reward, 4)
             result_msg = (
                 f"Alert {action.alert_id} closed as "
                 f"{'FALSE POSITIVE' if action.is_false_positive else 'CONFIRMED INCIDENT'}. "
-                f"Episode score: {self._episode_score:.3f}"
+                f"Grader episode score: {self._episode_score:.3f}"
             )
             obs = SOCObservation(
                 open_alerts=[],
@@ -243,12 +245,13 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
     #
     # Scoring (per correct action):
     #   +0.10  declared NOT false positive
-    #   +0.15  per malicious IP blocked  (104.22.33.44, 185.156.72.10, 91.108.4.201)
-    #   +0.20  per compromised user session revoked  (j.smith, m.rodriguez)
-    #   -0.10  per wrong IP blocked (any IP not in the malicious set)
-    #   -0.15  per wrong user session revoked (any user not compromised)
-    # Max: 0.10 + 3*0.15 + 2*0.20 = 0.10+0.45+0.40 = 0.95  (≈1.0 with rounding)
-    # Full 1.0 achievable if agent also gets the 0.05 step-reward bonus in trajectory.
+    #   +0.20  per malicious IP blocked  (×3 max → +0.60)
+    #          [104.22.33.44, 185.156.72.10, 91.108.4.201]
+    #   +0.15  per compromised user session revoked  (×2 max → +0.30)
+    #          [j.smith, m.rodriguez]
+    #   −0.10  per wrong IP blocked
+    #   −0.15  per innocent user revoked
+    # Max: 0.10 + 3×0.20 + 2×0.15 = 0.10 + 0.60 + 0.30 = 1.00
     # ------------------------------------------------------------------
     def _grade_medium(self, declared_fp: bool) -> float:
         status = self._network.get_status()
@@ -262,39 +265,38 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
 
         for ip in status["blocked_ips"]:
             if ip in MALICIOUS_IPS:
-                score += 0.15
+                score += 0.20
             elif ip in RED_HERRING_IPS:
-                score -= 0.10  # blocked the safe IP
+                score -= 0.10  # blocked the known-safe IP
             else:
-                score -= 0.10  # blocked an unknown/unrelated IP
+                score -= 0.10  # blocked an unrelated IP
 
         for user in status["revoked_sessions"]:
-            # Normalise — agent might pass full email or just username
             uname = user.split("@")[0].lower()
             if uname in COMPROMISED_USERS or user.lower() in COMPROMISED_USERS:
-                score += 0.20
+                score += 0.15
             else:
                 score -= 0.15  # revoked an innocent user
 
-        return round(max(0.0, score), 4)
+        return round(max(0.0, min(1.0, score)), 4)
 
     # ------------------------------------------------------------------
     # HARD GRADER
-    # Goal: trace 4-hop attack chain, isolate ALL 4 hosts, block BOTH C2 IPs,
+    # Goal: trace 4-hop chain, isolate ALL 4 hosts, block BOTH C2 IPs,
     #       revoke BOTH service accounts — within 10 steps.
     #
     # Scoring:
-    #   +0.05  declared NOT false positive
-    #   +0.10  per host isolated:
-    #            marketing-laptop-02, file-server-02, backup-server, db-server-main
-    #   +0.10  per C2 IP blocked:  185.220.101.52, 91.92.248.77
-    #   +0.10  per svc account revoked:  svc-backup, svc-monitor
-    #   +0.05  speed bonus if ALL objectives met in ≤8 steps
-    #   -0.10  per wrong host isolated (collateral damage)
-    #   -0.10  per wrong IP blocked
-    #   -0.10  per wrong user revoked
-    # Max: 0.05 + 4*0.10 + 2*0.10 + 2*0.10 + 0.05 = 0.05+0.40+0.20+0.20+0.05 = 0.90
-    # (trajectory step rewards push total to 1.0 for a clean run)
+    #   +0.05   declared NOT false positive
+    #   +0.125  per host isolated (×4 max → +0.50)
+    #           [marketing-laptop-02, file-server-02, backup-server, db-server-main]
+    #   +0.10   per C2 IP blocked (×2 max → +0.20)
+    #           [185.220.101.52, 91.92.248.77]
+    #   +0.10   per service account revoked (×2 max → +0.20)
+    #           [svc-backup, svc-monitor]
+    #   +0.05   speed bonus — ALL objectives met in ≤8 steps
+    #   −0.10   per wrong host isolated / wrong IP blocked / wrong account
+    # Max: 0.05 + 4×0.125 + 2×0.10 + 2×0.10 + 0.05
+    #    = 0.05 + 0.50  + 0.20  + 0.20  + 0.05 = 1.00
     # ------------------------------------------------------------------
     def _grade_hard(self, declared_fp: bool) -> float:
         status = self._network.get_status()
@@ -306,21 +308,21 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         if not declared_fp:
             score += 0.05
 
-        # Hosts
+        # Hosts — 0.125 each, max 4
         for host in status["isolated_hosts"]:
             if host in REQUIRED_HOSTS:
-                score += 0.10
+                score += 0.125
             else:
-                score -= 0.10  # wrong host isolated
+                score -= 0.10  # collateral damage
 
-        # C2 IPs
+        # C2 IPs — 0.10 each, max 2
         for ip in status["blocked_ips"]:
             if ip in C2_IPS:
                 score += 0.10
             else:
-                score -= 0.10  # wrong IP blocked
+                score -= 0.10  # unrelated IP blocked
 
-        # Service accounts
+        # Service accounts — 0.10 each, max 2
         for user in status["revoked_sessions"]:
             uname = user.split("@")[0].lower() if "@" in user else user.lower()
             if uname in SVC_ACCOUNTS or user.lower() in SVC_ACCOUNTS:
@@ -329,14 +331,18 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
                 score -= 0.10  # wrong account revoked
 
         # Speed bonus: all objectives achieved in ≤8 steps
-        all_hosts_isolated = REQUIRED_HOSTS.issubset(set(status["isolated_hosts"]))
-        all_c2_blocked = C2_IPS.issubset(set(status["blocked_ips"]))
-        all_accounts_revoked = SVC_ACCOUNTS.issubset(
+        isolated = set(status["isolated_hosts"])
+        blocked = set(status["blocked_ips"])
+        revoked_norm = (
             {u.split("@")[0].lower() for u in status["revoked_sessions"]}
             | {u.lower() for u in status["revoked_sessions"]}
         )
-        if all_hosts_isolated and all_c2_blocked and all_accounts_revoked:
-            if self._step_count <= 8:
-                score += 0.05  # speed bonus
+        all_done = (
+            REQUIRED_HOSTS.issubset(isolated)
+            and C2_IPS.issubset(blocked)
+            and SVC_ACCOUNTS.issubset(revoked_norm)
+        )
+        if all_done and self._step_count <= 8:
+            score += 0.05  # speed bonus
 
-        return round(max(0.0, score), 4)
+        return round(max(0.0, min(1.0, score)), 4)
