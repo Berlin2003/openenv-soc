@@ -216,10 +216,8 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
                 "content": f"Updated environment state:\n{result.observation.model_dump_json(indent=2)}",
             })
 
-        state = await env.state()
-        final = state.episode_score
-        print(f"\n  📊 Final Episode Score: {final:.3f}")
-        return float(final)
+        final_state = await env.state
+        return final_state.episode_score
 
 
 async def main(env_url: str):

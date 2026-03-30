@@ -18,6 +18,7 @@ from typing import Optional
 from openenv.core import Environment
 from models import SOCAction, SOCObservation, SOCState, Alert, NetworkStatus
 from server.mock_network import MockCorporateNetwork
+from server.mock_network import Alert as MockAlert
 
 
 class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
@@ -40,6 +41,29 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         self._investigation_steps: int = 0
 
     # -----------------------------------------------------------------------
+    # Helpers — convert mock types to Pydantic models
+    # -----------------------------------------------------------------------
+    @staticmethod
+    def _to_pydantic_alert(mock: MockAlert) -> Alert:
+        """Convert mock_network.Alert (dataclass) → models.Alert (Pydantic)."""
+        return Alert(
+            alert_id=mock.alert_id,
+            severity=mock.severity,
+            description=mock.description,
+            source_ip=mock.source_ip,
+            target_host=mock.target_host,
+        )
+
+    def _net_status(self) -> NetworkStatus:
+        """Return current network state as a Pydantic NetworkStatus model."""
+        s = self._network.get_status() if self._network else {}
+        return NetworkStatus(
+            isolated_hosts=s.get("isolated_hosts", []),
+            blocked_ips=s.get("blocked_ips", []),
+            revoked_sessions=s.get("revoked_sessions", []),
+        )
+
+    # -----------------------------------------------------------------------
     # OpenEnv API
     # -----------------------------------------------------------------------
     def reset(
@@ -56,11 +80,12 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         self._done = False
         self._investigation_steps = 0
         self._network = MockCorporateNetwork(task_name=task)
-        self._initial_alert = self._network.alerts[0]
+        # Convert the mock Alert dataclass to the Pydantic Alert model
+        self._initial_alert = self._to_pydantic_alert(self._network.alerts[0])
 
         return SOCObservation(
             open_alerts=[self._initial_alert],
-            network_status=NetworkStatus(**self._network.get_status()),
+            network_status=self._net_status(),
             last_action_result=(
                 f"[SOC Terminal] Incident queue loaded | task='{task}' "
                 f"| max_steps={self._max_steps} | Investigate and remediate."
@@ -75,7 +100,7 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
         if self._done:
             return SOCObservation(
                 open_alerts=[],
-                network_status=NetworkStatus(**self._network.get_status()),
+                network_status=self._net_status(),
                 last_action_result="Episode already done. Call reset().",
                 step_count=self._step_count,
                 done=True,
@@ -156,7 +181,7 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
             )
             obs = SOCObservation(
                 open_alerts=[],
-                network_status=NetworkStatus(**self._network.get_status()),
+                network_status=self._net_status(),
                 last_action_result=result_msg,
                 step_count=self._step_count,
                 reward=reward,
@@ -175,7 +200,7 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
 
         return SOCObservation(
             open_alerts=[self._initial_alert] if not self._done else [],
-            network_status=NetworkStatus(**self._network.get_status()),
+            network_status=self._net_status(),
             last_action_result=result_msg,
             step_count=self._step_count,
             reward=reward,
@@ -183,6 +208,7 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
             metadata={"episode_score": self._episode_score},
         )
 
+    @property
     def state(self) -> SOCState:
         status = self._network.get_status() if self._network else {}
         return SOCState(
