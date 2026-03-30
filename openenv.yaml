@@ -1,10 +1,14 @@
 name: soc-env
-version: 1.0.0
+version: 2.0.0
 description: >
   OpenEnv-SOC — Autonomous Security Operations Center Analyst.
-  An AI agent must investigate corporate network security alerts by querying logs,
-  analyzing threat intelligence, and remediating threats (blocking IPs, isolating hosts).
-  3 tasks ranging from easy (false positive) to hard (ransomware lateral movement).
+  An AI agent acts as a Tier-2 SOC analyst investigating realistic corporate
+  network security incidents. The agent must query timestamped logs across 3
+  sources (firewall, endpoint, activedirectory), look up threat intelligence,
+  navigate red-herring indicators, and apply precise remediation.
+  3 tasks: easy (phishing FP with investigation requirement), medium (3-IP
+  credential stuffing botnet + 2 compromised accounts + lateral movement),
+  hard (4-hop ransomware chain, 4 hosts, 2 C2 IPs, 2 service accounts, speed bonus).
 author: OpenEnv Community
 entrypoint: server.app:app
 tags:
@@ -15,13 +19,26 @@ tags:
 tasks:
   - id: easy
     name: Phishing False Positive
-    description: Identify that a reported suspicious link is benign and close the alert without overreacting.
+    description: >
+      Investigate a user-reported suspicious login link. Agent must query logs
+      and threat intel (and navigate a typosquat red herring) before determining
+      the link is the company's own SSO portal — then close as false positive
+      without isolating any hosts.
     max_steps: 15
   - id: medium
-    name: Credential Stuffing Attack
-    description: Detect a brute-force VPN attack that resulted in a compromised account, block the attacker and revoke the session.
+    name: Coordinated Credential Stuffing
+    description: >
+      A 3-IP botnet executed a credential stuffing attack compromising two VPN
+      accounts (j.smith, m.rodriguez). j.smith then moved laterally to
+      file-server-02. Agent must identify all attacker IPs, block all 3,
+      revoke both sessions, and avoid acting on the red-herring safe IP.
     max_steps: 15
   - id: hard
-    name: Ransomware Lateral Movement
-    description: Trace ransomware from an infected endpoint to a critical database server and isolate both hosts before data exfiltration.
+    name: Ransomware Lateral Movement (4-hop)
+    description: >
+      LockBit ransomware on marketing-laptop-02 pivoted through file-server-02
+      and backup-server to reach db-server-main, exfiltrating 2.1M customer
+      records via two C2 IPs. Two service accounts are compromised. Agent must
+      isolate all 4 hosts, block both C2 IPs, revoke both service accounts —
+      within 8 steps for a speed bonus. Red-herring Nagios traffic is present.
     max_steps: 10
