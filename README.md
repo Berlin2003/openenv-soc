@@ -131,7 +131,7 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860
 
 # Run baseline agent (in a separate terminal)
 export OPENAI_API_KEY="sk-..."
-python inference.py --base-url http://localhost:7860
+python inference.py --env-url http://localhost:7860
 ```
 
 ### Docker

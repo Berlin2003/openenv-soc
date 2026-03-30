@@ -21,10 +21,7 @@ import sys
 from openai import AsyncOpenAI
 
 from client import SOCEnvClient
-from models import (
-    QueryLogs, QueryThreatIntel, BlockIPAddress,
-    IsolateHost, RevokeUserSession, CloseAlert,
-)
+from models import SOCAction
 
 # ---------------------------------------------------------------------------
 # OpenAI Tool definitions (auto-derived from the action models' JSON schemas)
@@ -127,21 +124,22 @@ TOOLS = [
 ]
 
 
-def _build_action(name: str, args: dict):
-    """Map tool call name → typed Pydantic action model."""
-    dispatch = {
-        "query_logs": lambda a: QueryLogs(source=a["source"], query=a["query"]),
-        "query_threat_intel": lambda a: QueryThreatIntel(indicator=a["indicator"]),
-        "block_ip": lambda a: BlockIPAddress(ip_address=a["ip_address"]),
-        "isolate_host": lambda a: IsolateHost(hostname=a["hostname"]),
-        "revoke_session": lambda a: RevokeUserSession(username=a["username"]),
-        "close_alert": lambda a: CloseAlert(
+def _build_action(name: str, args: dict) -> SOCAction:
+    """Map tool call name → unified SOCAction model."""
+    tool_to_action = {
+        "query_logs":       lambda a: SOCAction(action_type="query_logs",       source=a["source"],       query=a["query"]),
+        "query_threat_intel": lambda a: SOCAction(action_type="query_threat_intel", indicator=a["indicator"]),
+        "block_ip":         lambda a: SOCAction(action_type="block_ip",          ip_address=a["ip_address"]),
+        "isolate_host":     lambda a: SOCAction(action_type="isolate_host",      hostname=a["hostname"]),
+        "revoke_session":   lambda a: SOCAction(action_type="revoke_session",    username=a["username"]),
+        "close_alert":      lambda a: SOCAction(
+            action_type="close_alert",
             alert_id=a["alert_id"],
             resolution_summary=a["resolution_summary"],
             is_false_positive=a.get("is_false_positive", False),
         ),
     }
-    fn = dispatch.get(name)
+    fn = tool_to_action.get(name)
     if not fn:
         raise ValueError(f"Unknown tool: {name}")
     return fn(args)
@@ -177,6 +175,7 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
 
         episode_score = 0.0
         done = False
+        final = 0.0
 
         while not done:
             response = await client.chat.completions.create(
@@ -220,7 +219,7 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
         state = await env.state()
         final = state.episode_score
         print(f"\n  📊 Final Episode Score: {final:.3f}")
-        return final
+        return float(final)
 
 
 async def main(env_url: str):
@@ -231,6 +230,9 @@ async def main(env_url: str):
     if not api_key or not api_base_url or not model_name:
         print("ERROR: HF_TOKEN, API_BASE_URL, and MODEL_NAME environment variables must be set.")
         sys.exit(1)
+
+    # Narrow types from Optional[str] to str (guaranteed by the check above)
+    assert api_key and api_base_url and model_name
 
     print(f"\n  Connecting to API: {api_base_url} (Model: {model_name})")
     oai = AsyncOpenAI(api_key=api_key, base_url=api_base_url)

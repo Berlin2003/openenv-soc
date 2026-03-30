@@ -141,17 +141,22 @@ class SOCEnvironment(Environment[SOCAction, SOCObservation, SOCState]):
             return max(0.0, score)
             
         elif self._task_name == "hard":
-            expected_fp = False
             score = 0.0
-            if not declared_fp: score += 0.2
-            if "marketing-laptop-02" in status.isolated_hosts: score += 0.4
-            if "db-server-main" in status.isolated_hosts:
-                score += 0.4 if self._step_count <= 6 else 0.1
+            if not declared_fp:
+                score += 0.2
+            laptop_isolated = "marketing-laptop-02" in status.isolated_hosts
+            db_isolated = "db-server-main" in status.isolated_hosts
+            if laptop_isolated:
+                score += 0.4
+            if db_isolated:
+                # Full bonus for speed (≤6 steps), partial for slow (>6 steps)
+                score += 0.4 if self._step_count <= 6 else 0.3
+            # Both hosts isolated but slow: 0.2 + 0.4 + 0.3 = 0.9 (still fair)
+            # Both hosts isolated fast:     0.2 + 0.4 + 0.4 = 1.0
             return max(0.0, score)
             
         return 0.0
 
-    @property
     def state(self) -> SOCState:
         status = self._network.get_status() if self._network else NetworkStatus()
         return SOCState(
