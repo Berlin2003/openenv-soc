@@ -221,12 +221,12 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
 
 
 async def main(env_url: str):
-    api_key = os.environ.get("HF_TOKEN")
+    api_key = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
 
     if not api_key or not api_base_url or not model_name:
-        print("ERROR: HF_TOKEN, API_BASE_URL, and MODEL_NAME environment variables must be set.")
+        print("ERROR: HF_TOKEN (or OPENAI_API_KEY), API_BASE_URL, and MODEL_NAME environment variables must be set.")
         sys.exit(1)
 
     # Narrow types from Optional[str] to str (guaranteed by the check above)
