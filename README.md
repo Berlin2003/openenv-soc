@@ -1,3 +1,12 @@
+---
+title: OpenEnv SOC
+emoji: 🛡️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # 🛡️ OpenEnv-SOC: Autonomous Security Operations Center Analyst
 
 <p align="center">
