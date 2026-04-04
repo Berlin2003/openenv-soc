@@ -1,0 +1,15 @@
+README.md
+client.py
+inference.py
+models.py
+pyproject.toml
+server/__init__.py
+server/app.py
+server/environment.py
+server/mock_network.py
+soc_env.egg-info/PKG-INFO
+soc_env.egg-info/SOURCES.txt
+soc_env.egg-info/dependency_links.txt
+soc_env.egg-info/entry_points.txt
+soc_env.egg-info/requires.txt
+soc_env.egg-info/top_level.txt
