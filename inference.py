@@ -161,7 +161,12 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
     )
 
     async with SOCEnvClient(base_url=base_url, task=task) as env:
-        obs = await env.reset()
+        try:
+            obs = await env.reset()
+        except Exception as e:
+            print(f"[ERROR] Failed to reset environment: {str(e)}")
+            return 0.0
+
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -199,8 +204,8 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
             tc = msg.tool_calls[0]
             name = tc.function.name
             try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError as e:
+                args = json.loads(tc.function.arguments or "{}")
+            except (json.JSONDecodeError, TypeError) as e:
                 print(f"[ERROR] Failed to parse tool arguments: {tc.function.arguments}")
                 messages.append({
                     "role": "tool",
@@ -243,10 +248,13 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
             })
 
         try:
-            final_state = await env.state
+            final_state = await env.state()
             return final_state.episode_score
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch final state: {str(e)}")
             return episode_score
+
+    return 0.0
 
 
 async def main(env_url: str):
@@ -254,15 +262,21 @@ async def main(env_url: str):
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
 
-    if not api_key or not api_base_url or not model_name:
-        print("ERROR: HF_TOKEN (or OPENAI_API_KEY), API_BASE_URL, and MODEL_NAME environment variables must be set.")
+    if not api_key or not model_name:
+        print("ERROR: HF_TOKEN (or OPENAI_API_KEY) and MODEL_NAME environment variables must be set.")
         sys.exit(1)
 
-    # Narrow types from Optional[str] to str (guaranteed by the check above)
-    assert api_key and api_base_url and model_name
-
-    print(f"\n  Connecting to API: {api_base_url} (Model: {model_name})")
-    oai = AsyncOpenAI(api_key=api_key, base_url=api_base_url)
+    print(f"\n  Connecting to API: {api_base_url or 'default'} (Model: {model_name})")
+    assert api_key and model_name
+    
+    try:
+        if api_base_url:
+            oai = AsyncOpenAI(api_key=api_key, base_url=api_base_url)
+        else:
+            oai = AsyncOpenAI(api_key=api_key)
+    except Exception as e:
+        print(f"ERROR: Failed to initialize AsyncOpenAI: {str(e)}")
+        sys.exit(1)
     task_ids = ["easy", "medium", "hard"]
     scores: dict[str, float] = {}
 
