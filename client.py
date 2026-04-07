@@ -34,10 +34,17 @@ class SOCEnvClient:
 
     async def reset(self) -> SOCObservation:
         """POST /reset — returns initial SOCObservation."""
-        resp = await self._client.post("/reset", json={"episode_id": self.episode_id, "task": self.task})
-        resp.raise_for_status()
-        data = resp.json()
-        return SOCObservation.model_validate(data.get("observation", data))
+        try:
+            resp = await self._client.post("/reset", json={"episode_id": self.episode_id, "task": self.task})
+            resp.raise_for_status()
+            data = resp.json()
+            return SOCObservation.model_validate(data.get("observation", data))
+        except httpx.HTTPStatusError as e:
+            print(f"[ERROR] Failed to reset environment: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] Unexpected error during reset: {str(e)}")
+            raise
 
     async def step(self, action: SOCAction) -> StepResult:
         """POST /step — returns StepResult(observation, reward, done, info)."""
@@ -45,15 +52,29 @@ class SOCEnvClient:
             "episode_id": self.episode_id,
             "action": action.model_dump(exclude_none=True)
         }
-        resp = await self._client.post("/step", json=payload)
-        resp.raise_for_status()
-        return StepResult.model_validate(resp.json())
+        try:
+            resp = await self._client.post("/step", json=payload)
+            resp.raise_for_status()
+            return StepResult.model_validate(resp.json())
+        except httpx.HTTPStatusError as e:
+            print(f"[ERROR] Failed to execute step: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] Unexpected error during step: {str(e)}")
+            raise
 
     async def state(self) -> SOCState:
         """GET /state — returns SOCState episode metadata."""
-        resp = await self._client.get(f"/state?episode_id={self.episode_id}")
-        resp.raise_for_status()
-        return SOCState.model_validate(resp.json())
+        try:
+            resp = await self._client.get(f"/state?episode_id={self.episode_id}")
+            resp.raise_for_status()
+            return SOCState.model_validate(resp.json())
+        except httpx.HTTPStatusError as e:
+            print(f"[ERROR] Failed to fetch state: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] Unexpected error fetching state: {str(e)}")
+            raise
 
     # ------------------------------------------------------------------
     # Sync convenience wrapper

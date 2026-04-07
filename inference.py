@@ -178,12 +178,16 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
         final = 0.0
 
         while not done:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="required",
-            )
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="required",
+                )
+            except Exception as e:
+                print(f"[ERROR] LLM API call failed: {str(e)}")
+                break
 
             msg = response.choices[0].message
             messages.append(msg.model_dump(exclude_none=True))
@@ -194,11 +198,33 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
 
             tc = msg.tool_calls[0]
             name = tc.function.name
-            args = json.loads(tc.function.arguments)
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Failed to parse tool arguments: {tc.function.arguments}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: Invalid JSON arguments provided: {str(e)}",
+                })
+                continue
+
             print(f"\n[STEP] Agent calls: {name}({json.dumps(args)})")
 
-            action = _build_action(name, args)
-            result = await env.step(action)
+            try:
+                action = _build_action(name, args)
+                result = await env.step(action)
+            except ValueError as e:
+                print(f"[ERROR] Action mapping failed: {str(e)}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: {str(e)}",
+                })
+                continue
+            except Exception as e:
+                print(f"[ERROR] Environment step failed: {str(e)}")
+                break
 
             done = result.done
             episode_score = result.info.get("episode_score", 0.0)
@@ -216,8 +242,11 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
                 "content": f"Updated environment state:\n{result.observation.model_dump_json(indent=2)}",
             })
 
-        final_state = await env.state
-        return final_state.episode_score
+        try:
+            final_state = await env.state
+            return final_state.episode_score
+        except Exception:
+            return episode_score
 
 
 async def main(env_url: str):
@@ -237,8 +266,16 @@ async def main(env_url: str):
     task_ids = ["easy", "medium", "hard"]
     scores: dict[str, float] = {}
 
-    for task in task_ids:
-        scores[task] = await run_task(env_url, task, model_name, oai)
+    try:
+        for task in task_ids:
+            try:
+                scores[task] = await run_task(env_url, task, model_name, oai)
+            except Exception as e:
+                print(f"[ERROR] Task {task} failed with unhandled exception: {str(e)}")
+                scores[task] = 0.0
+    except Exception as e:
+        print(f"[FATAL] Inference process failed: {str(e)}")
+        sys.exit(1)
 
     print(f"\n{'='*62}")
     print(f"  BASELINE RESULTS  (model={model_name})")
@@ -246,8 +283,10 @@ async def main(env_url: str):
     for t, s in scores.items():
         bar = "█" * int(s * 20)
         print(f"  {t:<8}  {s:.3f}  |{bar:<20}|")
-    avg = sum(scores.values()) / len(scores)
-    print(f"  {'avg':<8}  {avg:.3f}")
+    
+    if scores:
+        avg = sum(scores.values()) / len(scores)
+        print(f"  {'avg':<8}  {avg:.3f}")
     print(f"{'='*62}\n")
 
 
