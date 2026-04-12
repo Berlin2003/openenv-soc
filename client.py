@@ -68,7 +68,16 @@ class SOCEnvClient:
         try:
             resp = await self._client.get(f"/state?episode_id={self.episode_id}")
             resp.raise_for_status()
-            return SOCState.model_validate(resp.json())
+            data = resp.json()
+            # The openenv framework /state endpoint may return only base State
+            # fields. Fill in SOCState defaults so validation doesn't fail.
+            data.setdefault("task_name", "unknown")
+            data.setdefault("max_steps", 15)
+            data.setdefault("episode_score", 0.0)
+            data.setdefault("isolated_hosts", [])
+            data.setdefault("blocked_ips", [])
+            data.setdefault("revoked_sessions", [])
+            return SOCState.model_validate(data)
         except httpx.HTTPStatusError as e:
             print(f"[ERROR] Failed to fetch state: {e.response.status_code} - {e.response.text}")
             raise

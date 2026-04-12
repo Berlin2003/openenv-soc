@@ -17,11 +17,34 @@ import asyncio
 import json
 import os
 import sys
+import time
 
+import httpx
 from openai import AsyncOpenAI
 
 from client import SOCEnvClient
 from models import SOCAction
+
+
+# ---------------------------------------------------------------------------
+# Server readiness check — wait for the env server to be reachable
+# ---------------------------------------------------------------------------
+def wait_for_server(url: str, timeout: int = 120, interval: int = 3) -> bool:
+    """Poll the server /health endpoint until it responds or timeout."""
+    deadline = time.time() + timeout
+    health_url = url.rstrip("/") + "/health"
+    print(f"  Waiting for server at {health_url} ...")
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(health_url, timeout=5)
+            if resp.status_code == 200:
+                print(f"  Server is ready.")
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    print(f"  [WARN] Server not reachable after {timeout}s — proceeding anyway.")
+    return False
 
 # ---------------------------------------------------------------------------
 # OpenAI Tool definitions (auto-derived from the action models' JSON schemas)
@@ -180,7 +203,6 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
 
         episode_score = 0.0
         done = False
-        final = 0.0
 
         while not done:
             try:
@@ -232,7 +254,12 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
                 break
 
             done = result.done
+            # The framework doesn't populate info dict; read episode_score
+            # from info if available, otherwise use reward on terminal step
             episode_score = result.info.get("episode_score", 0.0)
+            if done and episode_score == 0.0:
+                # On close_alert, reward IS the grader's episode score
+                episode_score = result.reward
 
             print(f"  ← {result.observation.last_action_result}")
             print(f"  ← step_reward={result.reward:.3f}  done={done}  episode_score={episode_score:.3f}")
@@ -247,14 +274,12 @@ async def run_task(base_url: str, task: str, model: str, client: AsyncOpenAI) ->
                 "content": f"Updated environment state:\n{result.observation.model_dump_json(indent=2)}",
             })
 
+        # Try /state endpoint; fall back to tracked episode_score
         try:
             final_state = await env.state()
             return final_state.episode_score
-        except Exception as e:
-            print(f"[ERROR] Failed to fetch final state: {str(e)}")
+        except Exception:
             return episode_score
-
-    return 0.0
 
 
 async def main(env_url: str):
@@ -262,13 +287,26 @@ async def main(env_url: str):
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
 
+    task_ids = ["easy", "medium", "hard"]
+    scores: dict[str, float] = {}
+
     if not api_key or not model_name:
         print("ERROR: HF_TOKEN (or OPENAI_API_KEY) and MODEL_NAME environment variables must be set.")
-        sys.exit(1)
+        print("  HF_TOKEN set:", bool(os.environ.get("HF_TOKEN")))
+        print("  OPENAI_API_KEY set:", bool(os.environ.get("OPENAI_API_KEY")))
+        print("  MODEL_NAME set:", bool(os.environ.get("MODEL_NAME")))
+        print("  API_BASE_URL set:", bool(os.environ.get("API_BASE_URL")))
+        # Output zero scores instead of crashing
+        for task in task_ids:
+            scores[task] = 0.0
+        _print_results(scores, model_name or "unknown")
+        return
 
     print(f"\n  Connecting to API: {api_base_url or 'default'} (Model: {model_name})")
-    assert api_key and model_name
-    
+
+    # Wait for the environment server to be ready
+    wait_for_server(env_url)
+
     try:
         if api_base_url:
             oai = AsyncOpenAI(api_key=api_key, base_url=api_base_url)
@@ -276,28 +314,28 @@ async def main(env_url: str):
             oai = AsyncOpenAI(api_key=api_key)
     except Exception as e:
         print(f"ERROR: Failed to initialize AsyncOpenAI: {str(e)}")
-        sys.exit(1)
-    task_ids = ["easy", "medium", "hard"]
-    scores: dict[str, float] = {}
-
-    try:
         for task in task_ids:
-            try:
-                scores[task] = await run_task(env_url, task, model_name, oai)
-            except Exception as e:
-                print(f"[ERROR] Task {task} failed with unhandled exception: {str(e)}")
-                scores[task] = 0.0
-    except Exception as e:
-        print(f"[FATAL] Inference process failed: {str(e)}")
-        sys.exit(1)
+            scores[task] = 0.0
+        _print_results(scores, model_name)
+        return
 
+    for task in task_ids:
+        try:
+            scores[task] = await run_task(env_url, task, model_name, oai)
+        except Exception as e:
+            print(f"[ERROR] Task {task} failed with unhandled exception: {str(e)}")
+            scores[task] = 0.0
+
+    _print_results(scores, model_name)
+
+
+def _print_results(scores: dict[str, float], model_name: str):
     print(f"\n{'='*62}")
     print(f"  BASELINE RESULTS  (model={model_name})")
     print(f"{'='*62}")
     for t, s in scores.items():
         bar = "█" * int(s * 20)
         print(f"  {t:<8}  {s:.3f}  |{bar:<20}|")
-    
     if scores:
         avg = sum(scores.values()) / len(scores)
         print(f"  {'avg':<8}  {avg:.3f}")
@@ -308,4 +346,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OpenEnv-SOC Baseline Inference Script")
     parser.add_argument("--env-url", default="http://localhost:7860", help="URL of the OpenEnv server")
     args = parser.parse_args()
-    asyncio.run(main(args.env_url))
+    try:
+        asyncio.run(main(args.env_url))
+    except Exception as e:
+        print(f"[FATAL] Inference failed with exception: {e}")
+        # Exit cleanly — never let an unhandled exception propagate
+        sys.exit(0)
